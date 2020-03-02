@@ -93,7 +93,6 @@ if 'sphinx' not in sys.modules:
 
 MATRIX_USER = os.environ['MATRIX_USER']
 MATRIX_PASSWORD = os.environ['MATRIX_PASSWORD']
-MATRIX_TOKEN = os.environ['MATRIX_TOKEN']
 MATRIX_HOST = os.environ.get('MATRIX_HOST', "https://matrix.org")
 MATRIX_ROOM_IDS = os.environ['MATRIX_ROOM_IDS'].split(',')
 EXCLUDED_ROOM_IDS = os.environ.get('EXCLUDED_MATRIX_ROOM_IDS')
@@ -147,8 +146,10 @@ if __name__ == '__main__':
 
     print("MATRIX_HOST: '{}'".format(MATRIX_HOST))
     print("MATRIX_USER: '{}'".format(MATRIX_USER))
-    print("MATRIX_PASSWORD: '{}'".format(MATRIX_PASSWORD))
-    print("MATRIX_TOKEN: '{}'".format(MATRIX_TOKEN))
+    if MATRIX_PASSWORD is not None:
+        print("MATRIX_PASSWORD: '{}'".format("".join(["*" for c in MATRIX_PASSWORD])))
+    else:
+        print("MATRIX_PASSWORD: '{}'".format(MATRIX_PASSWORD))
     print("MATRIX_ROOM_IDS: '{}'".format(MATRIX_ROOM_IDS))
 
     print("Signing into {}...".format(MATRIX_HOST))
