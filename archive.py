@@ -16,11 +16,26 @@ from matrix_client.client import MatrixClient
 
 from pony.orm import *
 
-db = Database()
+
+# ----------------------------------------------------------------------------
+# Globals
+# ----------------------------------------------------------------------------
+MATRIX_USER = os.environ['MATRIX_USER']
+MATRIX_PASSWORD = os.environ['MATRIX_PASSWORD']
+MATRIX_HOST = os.environ.get('MATRIX_HOST', "https://matrix.org")
+MATRIX_ROOM_IDS = os.environ['MATRIX_ROOM_IDS'].split(',')
+EXCLUDED_ROOM_IDS = os.environ.get('EXCLUDED_MATRIX_ROOM_IDS')
+if EXCLUDED_ROOM_IDS is None:
+    EXCLUDED_ROOM_IDS = []
+else:
+    EXCLUDED_ROOM_IDS = EXCLUDED_ROOM_IDS.split(',')
+
 
 # ----------------------------------------------------------------------------
 # DB Models
 # ----------------------------------------------------------------------------
+db = Database()
+
 class Room(db.Entity):
     id = PrimaryKey(int, auto=True)
     room_id = Required(str, unique=True)
@@ -91,17 +106,6 @@ if 'sphinx' not in sys.modules:
         print("Connected to database: {}".format('db.sqlite'))
 
 
-MATRIX_USER = os.environ['MATRIX_USER']
-MATRIX_PASSWORD = os.environ['MATRIX_PASSWORD']
-MATRIX_HOST = os.environ.get('MATRIX_HOST', "https://matrix.org")
-MATRIX_ROOM_IDS = os.environ['MATRIX_ROOM_IDS'].split(',')
-EXCLUDED_ROOM_IDS = os.environ.get('EXCLUDED_MATRIX_ROOM_IDS')
-if EXCLUDED_ROOM_IDS is None:
-    EXCLUDED_ROOM_IDS = []
-else:
-    EXCLUDED_ROOM_IDS = EXCLUDED_ROOM_IDS.split(',')
-
-
 # Borrowed straight from osteele/matrix-archive.
 def get_room_events(client, room_id):
     """Iterate room events, starting at the cursor."""
@@ -124,6 +128,142 @@ def get_room_events(client, room_id):
 # Convert matrix timestamps to ISO8601 timestamps at highest resolution.
 def convert_to_iso8601(ts):
     return datetime.utcfromtimestamp(ts/1000).isoformat(timespec='milliseconds')
+
+
+@db_session
+def add_devices(devices):
+    print("Archiving Device list for user.")
+    for d in devices["devices"]:
+        user_id = d["user_id"]
+        device_id = d["device_id"]
+        display_name = d["display_name"]
+        last_seen_ts = d["last_seen_ts"]
+        last_seen_ip = d["last_seen_ip"]
+        item = Device.get(user_id=d["user_id"], device_id=d["device_id"])
+        if item is None:
+            # Fix up timestamp if it is present.
+            if last_seen_ts is not None:
+                last_seen_ts = convert_to_iso8601(last_seen_ts)
+            item = Device(user_id=user_id,
+                          device_id=device_id,
+                          display_name=display_name,
+                          last_seen_ts=last_seen_ts,
+                          last_seen_ip=last_seen_ip)
+            item.flush()
+        else:
+            # We've seen this device before.
+            print(" |-- Skipping Device: '{}' (Device ID: '{}') because it has already been archived.".format(display_name, device_id))
+    commit()
+
+
+@db_session
+def add_rooms(rooms):
+    # ------------------------------------------------
+    # Back up room metadata first, then members, then events.
+    for room_id in rooms:
+        room = rooms[room_id]
+        display_name = room.display_name
+        print("Archiving Room: '{}' (Room ID: '{}')".format(display_name, room_id))
+        # Skip rooms the user specifically wants to exclude.
+        if room_id in EXCLUDED_ROOM_IDS:
+            print(" |-- Skipping Room: '{}' (Room ID: '{}') because it is on the EXCLUDED list.".format(room.display_name, room_id))
+            continue
+        # Topic retrieval can fail with a 404 sometimes.
+        try:
+            topic = json.dumps(client.api.get_room_topic(room_id))
+        except Exception as e:
+            topic = None
+
+        # See if the room already exists in the DB.
+        print(" | Backing up room metadata...")
+        r = Room.get(room_id=room_id)
+        if r is None:
+            # Room hasn't been archived before.
+            item = Room(room_id=room_id,
+                        display_name=display_name,
+                        topic=topic)
+            item.flush()
+            r = item
+        else:
+            # We've seen this room before.
+            print(" |-- Skipping metadata for Room: '{}' (Room ID: '{}') because it has already been archived.".format(display_name, room_id))
+
+        # --------------------------------------------
+        # Back up room members.
+        print(" | Backing up list of room members...")
+        for member in room.get_joined_members():
+            display_name = member.displayname
+            user_id = member.user_id
+            avatar_url = member.get_avatar_url()
+            # See if the member already exists in the DB.
+            item = Member.get(room=r, user_id=user_id)
+            if item is None:
+                # Member hasn't been archived before.
+                item = Member(room=r,
+                              user_id=user_id,
+                              display_name=display_name,
+                              avatar_url=avatar_url)
+                item.flush()
+            else:
+                # We've seen this room before.
+                print(" |-- Skipping Member: '{}' (User ID: '{}') because it has already been archived.".format(display_name, user_id))
+
+        # --------------------------------------------
+        # Back up room events.
+        print(" | Backing up list of room events...")
+        events = get_room_events(client, room_id)
+        last_events = select(e for e in Event
+                             if e.room == r).order_by(desc(Event.origin_server_ts))[:1000]
+        last_event_ids = None
+        if last_events is None or last_events == []:
+            # No existing backup. Let's make a new one.
+            print(" |-- No existing events backup for this room. Creating a new one...")
+        else:
+            # We've got an existing backup, let's add to it.
+            print(" |-- Checking to see if new events have occurred since the last backup...")
+            last_event_ids = set([e.event_id for e in last_events])
+            #print("Last event ID: {} timestamp: {}".format(last_event_id, last_event.origin_server_ts))
+        new_events_saved = 0
+        # Events will be pulled down in batches.
+        # Note: Insertion order will be off globally, but correct within a batch.
+        #   Users will need to ORDER BY `origin_server_ts` to get a globally correct ordering.
+        stop_on_this_batch = False
+        event_batch = list(islice(events, 0, 1000))
+        while len(event_batch) > 0:
+            incoming_event_ids = set([e["event_id"] for e in event_batch])
+            # Set difference of incoming versus last 1k events in DB.
+            diff = incoming_event_ids.difference(last_event_ids)
+            for event in event_batch:
+                event_id = event["event_id"]
+                origin_server_ts = datetime.utcfromtimestamp(event["origin_server_ts"]/1000).isoformat(timespec='milliseconds')
+                #print("Current event ID: {} timestamp: {}".format(event_id, origin_server_ts))
+                # If we run into something we've already archived we'll be done after this batch.
+                if event_id not in diff:
+                    stop_on_this_batch = True
+                    continue
+                # Otherwise, archive this event.
+                new_events_saved += 1
+                content = event["content"]
+                sender = event["sender"]
+                type = event["type"]
+                origin_server_ts = datetime.utcfromtimestamp(event["origin_server_ts"]/1000).isoformat(timespec='milliseconds')
+                raw_json = json.dumps(event)
+
+                item = Event(room=r,
+                             event_id=event_id,
+                             content=content,
+                             sender=sender,
+                             type=type,
+                             origin_server_ts=origin_server_ts,
+                             raw_json=raw_json)
+                item.flush()
+            # Terminate if we hit known event IDs in this batch.
+            if stop_on_this_batch:
+                break
+            # Fetch next batch.
+            event_batch = list(islice(events, 0, 1000))
+        commit()
+        print(" | Archived {} new events for room '{}'".format(new_events_saved, room.display_name))
 
 
 # ----------------------------------------------------------------------------
@@ -157,146 +297,11 @@ if __name__ == '__main__':
     token = client.login(username=MATRIX_USER, password=MATRIX_PASSWORD, device_id="Matrix Archiver")
     #print("Token: {}".format(token))
 
-    print("Archiving Device list for user.")
-    @db_session
-    def add_devices(devices):
-        for d in devices["devices"]:
-            user_id = d["user_id"]
-            device_id = d["device_id"]
-            display_name = d["display_name"]
-            last_seen_ts = d["last_seen_ts"]
-            last_seen_ip = d["last_seen_ip"]
-            item = Device.get(user_id=d["user_id"], device_id=d["device_id"])
-            if item is None:
-                # Fix up timestamp if it is present.
-                if last_seen_ts is not None:
-                    last_seen_ts = convert_to_iso8601(last_seen_ts)
-                item = Device(user_id=user_id,
-                              device_id=device_id,
-                              display_name=display_name,
-                              last_seen_ts=last_seen_ts,
-                              last_seen_ip=last_seen_ip)
-                item.flush()
-            else:
-                # We've seen this device before.
-                print(" |-- Skipping Device: '{}' (Device ID: '{}') because it has already been archived.".format(display_name, device_id))
-        commit()
-
     # Archive the devices for this user.
     add_devices(client.api.get_devices())
 
-    @db_session
-    def add_rooms(rooms):
-        # ------------------------------------------------
-        # Back up room metadata first, then members, then events.
-        for room_id in rooms:
-            room = rooms[room_id]
-            display_name = room.display_name
-            print("Archiving Room: '{}' (Room ID: '{}')".format(display_name, room_id))
-            # Skip rooms the user specifically wants to exclude.
-            if room_id in EXCLUDED_ROOM_IDS:
-                print(" |-- Skipping Room: '{}' (Room ID: '{}') because it is on the EXCLUDED list.".format(room.display_name, room_id))
-                continue
-            # Topic retrieval can fail with a 404 sometimes.
-            try:
-                topic = json.dumps(client.api.get_room_topic(room_id))
-            except Exception as e:
-                topic = None
-
-            # See if the room already exists in the DB.
-            print(" | Backing up room metadata...")
-            r = Room.get(room_id=room_id)
-            if r is None:
-                # Room hasn't been archived before.
-                item = Room(room_id=room_id,
-                            display_name=display_name,
-                            topic=topic)
-                item.flush()
-                r = item
-            else:
-                # We've seen this room before.
-                print(" |-- Skipping metadata for Room: '{}' (Room ID: '{}') because it has already been archived.".format(display_name, room_id))
-
-            # --------------------------------------------
-            # Back up room members.
-            print(" | Backing up list of room members...")
-            for member in room.get_joined_members():
-                display_name = member.displayname
-                user_id = member.user_id
-                avatar_url = member.get_avatar_url()
-                # See if the member already exists in the DB.
-                item = Member.get(room=r, user_id=user_id)
-                if item is None:
-                    # Member hasn't been archived before.
-                    item = Member(room=r,
-                                  user_id=user_id,
-                                  display_name=display_name,
-                                  avatar_url=avatar_url)
-                    item.flush()
-                else:
-                    # We've seen this room before.
-                    print(" |-- Skipping Member: '{}' (User ID: '{}') because it has already been archived.".format(display_name, user_id))
-
-            # --------------------------------------------
-            # Back up room events.
-            print(" | Backing up list of room events...")
-            events = get_room_events(client, room_id)
-            last_events = select(e for e in Event
-                                 if e.room == r).order_by(desc(Event.origin_server_ts))[:1000]
-            last_event_ids = None
-            if last_events is None or last_events == []:
-                # No existing backup. Let's make a new one.
-                print(" |-- No existing events backup for this room. Creating a new one...")
-            else:
-                # We've got an existing backup, let's add to it.
-                print(" |-- Checking to see if new events have occurred since the last backup...")
-                last_event_ids = set([e.event_id for e in last_events])
-                #print("Last event ID: {} timestamp: {}".format(last_event_id, last_event.origin_server_ts))
-            new_events_saved = 0
-            # Events will be pulled down in batches.
-            # Note: Insertion order will be off globally, but correct within a batch.
-            #   Users will need to ORDER BY `origin_server_ts` to get a globally correct ordering.
-            stop_on_this_batch = False
-            event_batch = list(islice(events, 0, 1000))
-            while len(event_batch) > 0:
-                incoming_event_ids = set([e["event_id"] for e in event_batch])
-                # Set difference of incoming versus last 1k events in DB.
-                diff = incoming_event_ids.difference(last_event_ids)
-                for event in event_batch:
-                    event_id = event["event_id"]
-                    origin_server_ts = datetime.utcfromtimestamp(event["origin_server_ts"]/1000).isoformat(timespec='milliseconds')
-                    #print("Current event ID: {} timestamp: {}".format(event_id, origin_server_ts))
-                    # If we run into something we've already archived we'll be done after this batch.
-                    if event_id not in diff:
-                        stop_on_this_batch = True
-                        continue
-                    # Otherwise, archive this event.
-                    new_events_saved += 1
-                    content = event["content"]
-                    sender = event["sender"]
-                    type = event["type"]
-                    origin_server_ts = datetime.utcfromtimestamp(event["origin_server_ts"]/1000).isoformat(timespec='milliseconds')
-                    raw_json = json.dumps(event)
-
-                    item = Event(room=r,
-                                 event_id=event_id,
-                                 content=content,
-                                 sender=sender,
-                                 type=type,
-                                 origin_server_ts=origin_server_ts,
-                                 raw_json=raw_json)
-                    item.flush()
-                # Terminate if we hit known event IDs in this batch.
-                if stop_on_this_batch:
-                    break
-                # Fetch next batch.
-                event_batch = list(islice(events, 0, 1000))
-            commit()
-            print(" | Archived {} new events for room '{}'".format(new_events_saved, room.display_name))
-
     # Archive the rooms.
-    rooms = client.get_rooms()
-    add_rooms(rooms)
+    add_rooms(client.get_rooms())
 
     print("Done with archiving run. Logging out of Matrix...")
     client.logout()
