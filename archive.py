@@ -50,6 +50,7 @@ class Member(db.Entity):
     room = Required(Room)
     display_name = Required(str)
     user_id = Required(str)
+    room_id = Required(str)
     avatar_url = Optional(str, nullable=True)
     retrieval_ts = Required(datetime, default=lambda: datetime.utcnow())
 
@@ -69,6 +70,7 @@ class Event(db.Entity):
     sender = Required(str)
     type = Required(str)
     event_id = Required(str, unique=True)
+    room_id = Required(str)
     origin_server_ts = Required(datetime)
     raw_json = Required(Json)
     retrieval_ts = Required(datetime, default=lambda: datetime.utcnow())
@@ -201,6 +203,7 @@ def add_rooms(rooms):
                 # Member hasn't been archived before.
                 item = Member(room=r,
                               user_id=user_id,
+                              room_id=r.room_id,
                               display_name=display_name,
                               avatar_url=avatar_url)
                 item.flush()
@@ -214,7 +217,7 @@ def add_rooms(rooms):
         events = get_room_events(client, room_id)
         last_events = select(e for e in Event
                              if e.room == r).order_by(desc(Event.origin_server_ts))[:1000]
-        last_event_ids = None
+        last_event_ids = set()
         if last_events is None or last_events == []:
             # No existing backup. Let's make a new one.
             print(" |-- No existing events backup for this room. Creating a new one...")
@@ -251,6 +254,7 @@ def add_rooms(rooms):
 
                 item = Event(room=r,
                              event_id=event_id,
+                             room_id=r.room_id,
                              content=content,
                              sender=sender,
                              type=type,
