@@ -26,6 +26,7 @@ This will save `@bob`'s Matrix chats in an SQLite DB named `my_archive.db`.
 
  - Export scripts, such as exporting a room to HTML.
  - Support for other databases, like Postgre and MariaDB.
+ - Archiving avatar images for room members.
 
 ## Known issues
 
