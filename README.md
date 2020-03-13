@@ -18,14 +18,18 @@ This will save `@bob`'s Matrix chats in an SQLite DB named `my_archive.db`.
 
  - Archives full device list for the user.
  - Archives full event list for Matrix rooms.
+ - Image and files are downloaded, along with metadata.
  - Archives full member lists for Matrix rooms.
  - Incremental backups on everything! (Very important in long-running rooms)
 
 ## Roadmap
 
- - Image and file downloads
  - Export scripts, such as exporting a room to HTML.
  - Support for other databases, like Postgre and MariaDB.
+
+## Known issues
+
+ - In longer chats, if a backup fails partway through backing up the events in a room (over 1k events), the incremental backup logic can prevent a full backup from occurring on the next run. To work around this, ensure the first backup gets *everything* in the room of interest, and then incremental backups should work correctly for future archiving runs. (This is planned to be fixed in a future version!)
 
 ## Inspired by
 
