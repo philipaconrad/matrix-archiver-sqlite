@@ -330,7 +330,6 @@ def add_rooms(rooms):
                 break
             # Fetch next batch.
             event_batch = list(islice(events, 0, 1000))
-            commit()
         commit()
         print(" | Archived {} new events for room '{}'".format(new_events_saved, room.display_name))
 
