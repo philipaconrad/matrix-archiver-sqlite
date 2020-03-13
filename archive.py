@@ -13,6 +13,7 @@ from datetime import datetime
 from itertools import islice
 
 from matrix_client.client import MatrixClient
+import requests
 
 from pony.orm import *
 
@@ -29,6 +30,7 @@ if EXCLUDED_ROOM_IDS is None:
     EXCLUDED_ROOM_IDS = []
 else:
     EXCLUDED_ROOM_IDS = EXCLUDED_ROOM_IDS.split(',')
+MAX_FILESIZE = os.environ.get('MAX_FILESIZE', 1099511627776)  # 1 TB max filesize.
 
 
 # ----------------------------------------------------------------------------
@@ -73,6 +75,20 @@ class Event(db.Entity):
     room_id = Required(str)
     origin_server_ts = Required(datetime)
     raw_json = Required(Json)
+    retrieval_ts = Required(datetime, default=lambda: datetime.utcnow())
+
+class File(db.Entity):
+    id = PrimaryKey(int, auto=True)
+    filename = Required(str)
+    size = Required(int) # Size of file in bytes.
+    mime_type = Optional(str, nullable=True)
+    is_image = Required(bool, default=False) # Flag to make queries easier.
+    is_cached = Required(bool, default=False) # Flag to make queries easier.
+    data = Optional(bytes, nullable=True)
+    fetch_url_http = Required(str, unique=True) # Resolved HTTP URL for the file.
+    fetch_url_matrix = Required(str, unique=True)
+    last_fetch_status = Required(str)
+    last_fetch_ts = Required(datetime, default=lambda: datetime.utcnow())
     retrieval_ts = Required(datetime, default=lambda: datetime.utcnow())
 
 
@@ -261,11 +277,60 @@ def add_rooms(rooms):
                              origin_server_ts=origin_server_ts,
                              raw_json=raw_json)
                 item.flush()
+
+                # Download files if message.content['msgtype'] == 'm.file'
+                if "msgtype" in item.content.keys() and item.content["msgtype"] in ["m.file", "m.image"]:
+                    print(" |---- Attempting to archive file: '{}'".format(item.content["body"]))
+                    filename = item.content["body"]
+                    file_size = item.content["info"]["size"]
+                    is_image = (item.content["msgtype"] == "m.image")
+                    matrix_download_url = item.content["url"]
+                    http_download_url = client.api.get_download_url(matrix_download_url)
+                    data = None
+                    is_cached = False
+                    last_fetch_status = "Fail"
+
+                    file_entry = File.get(fetch_url_matrix=matrix_download_url)
+                    # If not cached, or last fetch failed, try fetching the file.
+                    if file_entry is None or file_entry.is_cached == False:
+                        try:
+                            req = requests.get(http_download_url, stream=True)
+                            if int(req.headers["content-length"]) < MAX_FILESIZE:
+                                data = req.content
+                                is_cached = True
+                                last_fetch_status = "{} {}".format(req.status_code, req.reason)
+                            else:
+                                print(" |     File: '{}' of size {} bytes was not archived due to size in excess of limit ({} bytes).".format(filename, file_size, MAX_FILESIZE))
+                        except Exception as e:
+                            print("       Could not fetch file. Traceback:\n       {}".format(e))
+                            is_cached = False
+                    else:
+                        print(" |------ Skipping because file is already archived!")
+
+                    if file_entry is None:
+                        file_entry = File(filename=filename,
+                                          size=file_size,
+                                          mime_type=item.content["info"].get("mimetype"),
+                                          is_image=is_image,
+                                          is_cached=is_cached,
+                                          data=data,
+                                          fetch_url_http=http_download_url,
+                                          fetch_url_matrix=matrix_download_url,
+                                          last_fetch_status=last_fetch_status)
+                    else:
+                        # Update data field if we had a successful fetch.
+                        if data is not None:
+                            file_entry.data = data
+                        file_entry.last_fetch_status = last_fetch_status
+                        file_entry.last_fetch_ts = datetime.utcnow().isoformat()
+                    file_entry.flush()
+
             # Terminate if we hit known event IDs in this batch.
             if stop_on_this_batch:
                 break
             # Fetch next batch.
             event_batch = list(islice(events, 0, 1000))
+            commit()
         commit()
         print(" | Archived {} new events for room '{}'".format(new_events_saved, room.display_name))
 
