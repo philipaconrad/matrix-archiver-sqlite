@@ -98,31 +98,6 @@ class File(db.Entity):
 # Default setting. Useful for testing.
 db_provider = os.environ.get('DB_PROVIDER', 'sqlite')
 
-# Avoid running configuration stuff when generating Sphinx docs.
-# Cite: https://stackoverflow.com/a/45441490
-if 'sphinx' not in sys.modules:
-    if db_provider == "postgres":
-        # Cite: https://stackoverflow.com/a/23331896
-        pwd = os.environ.get('DB_PASSWORD')
-        port = os.environ.get('DB_PORT')
-
-        # Connect to DB and auto-gen tables as needed.
-        db.bind(provider='postgres',
-                user=os.environ['DB_USER'],
-                password=pwd,
-                host=os.environ['DB_HOST'],
-                port=port,
-                database=os.environ['DB_NAME'])
-        db.generate_mapping(create_tables=True)
-        print("Connected to database: {}".format(os.environ['DB_NAME']))
-    elif db_provider == "sqlite":
-        # Connect to DB and auto-gen tables as needed.
-        db.bind(provider='sqlite',
-                filename='db.sqlite',
-                create_db=True)
-        db.generate_mapping(create_tables=True)
-        print("Connected to database: {}".format('db.sqlite'))
-
 
 # Borrowed straight from osteele/matrix-archive.
 def get_room_events(client, room_id):
@@ -351,6 +326,31 @@ if __name__ == '__main__':
     matrix_rooms = args.room
     matrix_host = args.host
     dbname = args.db
+    
+    # Avoid running configuration stuff when generating Sphinx docs.
+    # Cite: https://stackoverflow.com/a/45441490
+    if 'sphinx' not in sys.modules:
+        if db_provider == "postgres":
+            # Cite: https://stackoverflow.com/a/23331896
+            pwd = os.environ.get('DB_PASSWORD')
+            port = os.environ.get('DB_PORT')
+
+            # Connect to DB and auto-gen tables as needed.
+            db.bind(provider='postgres',
+                    user=os.environ['DB_USER'],
+                    password=pwd,
+                    host=os.environ['DB_HOST'],
+                    port=port,
+                    database=os.environ['DB_NAME'])
+            db.generate_mapping(create_tables=True)
+            print("Connected to database: {}".format(os.environ['DB_NAME']))
+        elif db_provider == "sqlite":
+            # Connect to DB and auto-gen tables as needed.
+            db.bind(provider='sqlite',
+                    filename=dbname,
+                    create_db=True)
+            db.generate_mapping(create_tables=True)
+            print("Connected to database: {}".format(dbname))
 
     print("MATRIX_HOST: '{}'".format(MATRIX_HOST))
     print("MATRIX_USER: '{}'".format(MATRIX_USER))
