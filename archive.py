@@ -21,8 +21,9 @@ from pony.orm import *
 # ----------------------------------------------------------------------------
 # Globals
 # ----------------------------------------------------------------------------
-MATRIX_USER = os.environ['MATRIX_USER']
-MATRIX_PASSWORD = os.environ['MATRIX_PASSWORD']
+MATRIX_USER = os.environ.get('MATRIX_USER', None)
+MATRIX_PASSWORD = os.environ.get('MATRIX_PASSWORD', None)
+MATRIX_TOKEN = os.environ.get('MATRIX_TOKEN', None)
 MATRIX_HOST = os.environ.get('MATRIX_HOST', "https://matrix.org")
 MATRIX_ROOM_IDS = os.environ['MATRIX_ROOM_IDS'].split(',')
 EXCLUDED_ROOM_IDS = os.environ.get('EXCLUDED_MATRIX_ROOM_IDS')
@@ -358,12 +359,16 @@ if __name__ == '__main__':
         print("MATRIX_PASSWORD: '{}'".format("".join(["*" for c in MATRIX_PASSWORD])))
     else:
         print("MATRIX_PASSWORD: '{}'".format(MATRIX_PASSWORD))
+    print("MATRIX_TOKEN: '{}'".format(MATRIX_TOKEN))
     print("MATRIX_ROOM_IDS: '{}'".format(MATRIX_ROOM_IDS))
 
     print("Signing into {}...".format(MATRIX_HOST))
-    client = MatrixClient(MATRIX_HOST)
-    token = client.login(username=MATRIX_USER, password=MATRIX_PASSWORD, device_id="Matrix Archiver")
-    #print("Token: {}".format(token))
+    if MATRIX_TOKEN is not None:
+        client = MatrixClient(MATRIX_HOST, token=MATRIX_TOKEN)
+    else:
+        client = MatrixClient(MATRIX_HOST)
+        token = client.login(username=MATRIX_USER, password=MATRIX_PASSWORD, device_id="Matrix Archiver")
+        #print("Token: {}".format(token))
 
     # Archive the devices for this user.
     add_devices(client.api.get_devices())
